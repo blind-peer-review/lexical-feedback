@@ -1,0 +1,582 @@
+---
+title: "Statistical analyses"
+author: "Author 1"
+date: "2023-10-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<br>
+Hello, reader! Thank you for your interest in this work.
+
+Let me guide you through the steps taken to conduct the statistical analyses reported on our paper.
+
+## Preparation
+
+**Loading libraries**
+
+Here are the libraries that we are going to employ. If you have not already, remember to install them via `install.packages()` first:
+
+```{r load libraries, message=FALSE}
+library(tidyverse)
+library(corrplot)
+library(ggstatsplot)
+library(lme4)
+library(caret)
+library(car)
+library(broom)
+library(glmmTMB)
+library(DHARMa)
+library(mosaic)
+library(MASS)
+library(nlme)
+library(nnet)
+library(lmtest)
+library(glmnet)
+library(visreg)
+library(mgcv)
+library(ggeffects)
+library(ROCR)
+library(broom.mixed)
+library(boot)
+library(parameters)
+```
+<br>
+<br>
+**Loading data sets**
+
+Next, we are going to load the data sets obtained after computing the measures needed for our model with Python.
+
+```{r load files, message=FALSE}
+# ==== 1. STUDENT PREFERENCES ====
+student_preferences <- read_csv('Data/participant_responses.csv')
+
+# ==== 2. TEXT AND FULL ERROR ANALYSES ====
+full_text_analysis <- read_csv('Data/full_measures.csv')
+full_error_measures <- read_csv('Data/full_error_measures.csv')
+
+# ==== 3. TEXT AND TRACKED ERROR ANALYSIS ====
+tracked_text_analysis <- read_csv('Data/tracked_error_measures.csv')
+```
+
+<br>
+<br>
+**RQ1: WHAT TYPES OF WCF, IF ANY, MOST EFFECTIVELY ENHANCE THE LEXICAL ACCURACY OF ADVANCED SFL LEARNERS? DO THEY ACHIEVE THIS IMPROVEMENT AT THE COST OF LEXICAL COMPLEXITY?**
+<br>
+
+```{r rq1 analyses, message=FALSE, fig.width=12, fig.height=6}
+
+# 1.1. === DATA PREPARATION ===
+
+full_text_analysis <- full_join(full_text_analysis, full_error_measures, by = "error")
+rows_to_remove <- c(65, 67, 187, 195)
+full_text_analysis <- full_text_analysis[-rows_to_remove,]
+
+lmm.df <- full_text_analysis %>% dplyr::select(participant_ID = participant_ID.x,
+                                               text_ID = text_ID.x,
+                                               TextNum = TextNum.x,
+                                               fb_type = fb_type.x,
+                                               word_count = Total,
+                                               lexical_density = `Lexical density`,
+                                               FreqC1, FreqC2, rttr, mtld, error_rate)
+
+lmm.df.wide <- lmm.df %>%
+  group_by(text_ID, fb_type) %>%
+  summarise(count = n()) %>%
+  pivot_wider(names_from = fb_type, values_from = count,
+              names_prefix = "fb_count_")
+
+lmm.df.wide[is.na(lmm.df.wide)] <- 0
+
+lmm.df <- full_join(lmm.df, lmm.df.wide, by = "text_ID")
+
+lmm.df <- lmm.df %>%
+  mutate(FreqC = FreqC1 + FreqC2) %>%
+  dplyr::select(-text_ID, -fb_type, -FreqC1, -FreqC2)
+
+lmm.df <- distinct(lmm.df)
+
+lmm.df <- lmm.df %>%
+  arrange(participant_ID, TextNum) %>%
+  group_by(participant_ID) %>%
+  mutate(across(starts_with("fb_count_"), \(x) lag(x, default = 0))) %>%
+  ungroup() %>%
+  arrange(participant_ID, TextNum)
+
+lmm.df <- lmm.df %>%
+  mutate(across(starts_with("fb_count_"), ~ . / word_count, .names = "rate_{.col}"))
+
+lmm.df <- lmm.df %>%
+  dplyr::select(-word_count, -c("fb_count_D.M.":"fb_count_R"))
+
+lmm.df$participant_ID <- as.factor(lmm.df$participant_ID)
+lmm.df$TextNum <- as.factor(lmm.df$TextNum)
+
+lmm.df$rate_fb_count_D.M. <- scale(lmm.df$rate_fb_count_D.M.)
+lmm.df$rate_fb_count_D.N.M <- scale(lmm.df$rate_fb_count_D.N.M)
+lmm.df$rate_fb_count_I.L. <- scale(lmm.df$rate_fb_count_I.L.)
+lmm.df$rate_fb_count_I.M. <- scale(lmm.df$rate_fb_count_I.M.)
+lmm.df$rate_fb_count_None <- scale(lmm.df$rate_fb_count_None)
+lmm.df$rate_fb_count_R <- scale(lmm.df$rate_fb_count_R)
+
+
+# 1.2. === GENERALIZED LINEAR MIXED EFFECTS MODEL WITH BETA DISTRIBUTION ===
+
+# 1.2.1. Fitting and interpreting the model
+
+model.RQ1.errorRate <- glmmTMB(
+  error_rate ~ rate_fb_count_D.M. + rate_fb_count_D.N.M + rate_fb_count_I.L. +
+    rate_fb_count_I.M. + rate_fb_count_None + rate_fb_count_R + (1|participant_ID) + (1|TextNum),
+  data = lmm.df, family = beta_family())
+
+summary(model.RQ1.errorRate)
+
+model_parameters(model.RQ1.errorRate)
+model_parameters(model.RQ1.errorRate, exponentiate = TRUE)
+
+
+# 1.2.2 Checking for overdispersion
+overdisp <- residuals(model.RQ1.errorRate, type = "pearson")^2
+overdisp_ratio <- sum(overdisp) / df.residual(model.RQ1.errorRate)
+overdisp_ratio
+
+car::vif(lm(error_rate ~ rate_fb_count_D.M. + rate_fb_count_D.N.M + rate_fb_count_I.L. + rate_fb_count_I.M. + rate_fb_count_None + rate_fb_count_R, data = lmm.df))
+
+
+# 1.2.3 Visualizing fitted values vs. observed values
+#plot(fitted(model.RQ1.errorRate), lmm.df$error_rate, xlab = "Fitted Values", ylab = "Observed Values")
+
+# 1.2.4. Checking residuals vs. fitted values
+#plot(fitted(model.RQ1.errorRate), resid(model.RQ1.errorRate), xlab = "Fitted Values", ylab = "Residuals")
+
+# 1.2.5. Checking the Q-Q plot of the residuals
+#qqnorm(resid(model.RQ1.errorRate))
+#qqline(resid(model.RQ1.errorRate))
+
+# 1.2.6. Interpreting residuals
+
+##   Florian Hartig (2022). DHARMa: Residual Diagnostics for Hierarchical
+##   (Multi-Level / Mixed) Regression Models. R package version 0.4.6.
+##   http://florianhartig.github.io/DHARMa/
+
+par(mfrow = c(1, 2))
+a <- plotQQunif(model.RQ1.errorRate)
+b <- plotResiduals(model.RQ1.errorRate)
+par(mfrow = c(1, 1))
+
+# 1.3. === PERMUTATION TESTS ON THE EQUALITY OF MEANS OF LEXICAL COMPLEXITY MEASURES ===
+
+# 1.3.1. Calculate the observed difference in means
+
+avg.FreqC <- mean(FreqC ~ TextNum, data = lmm.df) %>%
+  diff()
+avg.mtld <- mean(mtld ~ TextNum, data = lmm.df) %>%
+  diff()
+avg.density <- mean(lexical_density ~ TextNum, data = lmm.df) %>%
+  diff()
+
+# 1.3.2. Create a randomization distribution of all the differences in means under the null hypothesis
+set.seed(17)
+FreqC_null <- do(10000) * mean(FreqC ~ shuffle(TextNum), data = lmm.df) %>%
+  diff()
+set.seed(17)
+mtld_null <- do(10000) * mean(mtld ~ shuffle(TextNum), data = lmm.df) %>%
+  diff()
+set.seed(17)
+density_null <- do(10000) * mean(lexical_density ~ shuffle(TextNum), data = lmm.df) %>%
+  diff()
+
+# 1.3.3. Plot the randomization distribution
+p <- ggplot(data = FreqC_null) +
+  geom_histogram(mapping = aes(x = X2), alpha = 0.5, colour = "white") +
+  geom_histogram(mapping = aes(x = X3), alpha = 0.5, colour = "green") +
+  geom_histogram(mapping = aes(x = X4), alpha = 0.5, colour = "purple") +
+  xlab("mean difference")
+
+q <- ggplot(data = mtld_null) +
+  geom_histogram(mapping = aes(x = X2), alpha = 0.5, colour = "white") +
+  geom_histogram(mapping = aes(x = X3), alpha = 0.5, colour = "green") +
+  geom_histogram(mapping = aes(x = X4), alpha = 0.5, colour = "purple") +
+  xlab("mean difference")
+
+r <- ggplot(data = density_null) +
+  geom_histogram(mapping = aes(x = X2), alpha = 0.5, colour = "white") +
+  geom_histogram(mapping = aes(x = X3), alpha = 0.5, colour = "green") +
+  geom_histogram(mapping = aes(x = X4), alpha = 0.5, colour = "purple") +
+  xlab("mean difference")
+
+# 1.3.4. Superimpose a line indicating the observation
+p + geom_vline(xintercept = avg.FreqC, linetype = 2, colour = "blue")
+q + geom_vline(xintercept = avg.mtld, linetype = 2, colour = "blue")
+r + geom_vline(xintercept = avg.density, linetype = 2, colour = "blue")
+
+# 1.3.6. Calculate the proportion of simulated differences in means as or more extreme than the observed
+
+prop_FreqC_X2 <- mean(FreqC_null$X2 >= avg.FreqC["2"])
+prop_FreqC_X3 <- mean(FreqC_null$X3 >= avg.FreqC["3"])
+prop_FreqC_X4 <- mean(FreqC_null$X4 >= avg.FreqC["4"])
+
+prop_mtld_X2 <- mean(mtld_null$X2 >= avg.mtld["2"])
+prop_mtld_X3 <- mean(mtld_null$X3 >= avg.mtld["3"])
+prop_mtld_X4 <- mean(mtld_null$X4 >= avg.mtld["4"])
+
+prop_density_X2 <- mean(density_null$X2 >= avg.density["2"])
+prop_density_X3 <- mean(density_null$X3 >= avg.density["3"])
+prop_density_X4 <- mean(density_null$X4 >= avg.density["4"])
+
+# 1.3.7. Apply BH correction
+
+p_values_FreqC <- c(prop_FreqC_X2, prop_FreqC_X3, prop_FreqC_X4)
+p_values_mtld <- c(prop_mtld_X2, prop_mtld_X3, prop_mtld_X4)
+p_values_density <- c(prop_density_X2, prop_density_X3, prop_density_X4)
+
+p_values_FreqC_corrected <- p.adjust(p_values_FreqC, method = "BH", n = length(p_values_FreqC))
+p_values_mtld_corrected <- p.adjust(p_values_mtld, method = "BH", n = length(p_values_mtld))
+p_values_density_corrected <- p.adjust(p_values_density, method = "BH", n = length(p_values_density))
+
+p_values_FreqC_corrected
+p_values_mtld_corrected
+p_values_density_corrected
+```
+
+<br>
+<br>
+<br>
+**RQ2: HOW DO THE DIFFERENT WCF FORMATS THE TEACHER PROVIDES RELATE TO THE VARIOUS TYPES OF LEXICAL ERRORS COMMITTED BY THE LEARNERS AND THEIR SUBSEQUENT MENDING OR REPETITION?**
+
+```{r rq2, message=FALSE, fig.width=12, fig.height=6}
+
+# === 2.1. DATA PREPARATION ===
+
+# 2.1.1. Join the error and text analyses with the questionnaire responses
+preferences_and_performance <- full_join(student_preferences, tracked_text_analysis, by = "participant_ID")
+
+
+# 2.1.2. Keep only relevant columns
+preferences_and_performance <- preferences_and_performance[, c("participant_ID",
+                                                               "age",
+                                                               "sex",
+                                                               "country",
+                                                               "background",
+                                                               "years_speak_spa",
+                                                               "fb_importance",
+                                                               "fb_satisfaction",
+                                                               "freq_seek_additional_info",
+                                                               "how_much_fb_helps_learn",
+                                                               "fb_1_clarity", "fb_1_usefulness", "likes_fb_1",
+                                                               "fb_2_clarity", "fb_2_usefulness", "likes_fb_2",
+                                                               "fb_3_clarity", "fb_3_usefulness", "likes_fb_3",
+                                                               "fb_4_clarity", "fb_4_usefulness", "likes_fb_4",
+                                                               "fb_5_clarity", "fb_5_usefulness", "likes_fb_5",
+                                                               "fb_6_clarity", "fb_6_usefulness", "likes_fb_6",
+                                                               "fb_7_clarity", "fb_7_usefulness", "likes_fb_7",
+                                                               "text_ID",
+                                                               "error",
+                                                               "error_type",
+                                                               "fb_type",
+                                                               "pass_solution_reps", "fail_solution_reps", "error_reps",
+                                                               "TextNum",
+                                                               "error_rate", "error_rate_per_type", "fb_rate_per_type",
+                                                               "FreqA1", "FreqA2", "FreqB1", "FreqB2", "FreqC1", "FreqC2",
+                                                               "msttr", "mattr", "ttr", "rttr", "cttr",
+                                                               "mtld", "hdd", "Herdan", "Summer", "Dugast", "Maas",
+                                                               "outcome")]
+
+
+# === 2.2. LASSO REGRESSION ===
+
+# 2.2.1. Collapse the "Both fixed and repeated" and "Fixed inadequately" levels to simplify the model and upsample the data to address class imbalance
+
+preferences_and_performance$outcome[preferences_and_performance$outcome == "Both fixed and repeated"] <- "Fixed"
+preferences_and_performance$outcome[preferences_and_performance$outcome == "Both fixed and repeated"] <- "Repeated"
+preferences_and_performance$outcome[preferences_and_performance$outcome == "Fixed inadequately"] <- "Repeated"
+
+preferences_and_performance$fb_type <- as.factor(preferences_and_performance$fb_type)
+preferences_and_performance$fb_type <- relevel(preferences_and_performance$fb_type, ref = "No WCF")
+preferences_and_performance$error_type <- as.factor(preferences_and_performance$error_type)
+preferences_and_performance$outcome <- as.factor(preferences_and_performance$outcome)
+preferences_and_performance$participant_ID <- as.factor(preferences_and_performance$participant_ID)
+
+set.seed(17)
+up.preferences_and_performance <- upSample(preferences_and_performance[,-60],
+                                           preferences_and_performance$outcome,
+                                           yname="outcome")
+
+up.preferences_and_performance <- up.preferences_and_performance %>%
+  dplyr::select(outcome, fb_type, error_type, participant_ID)
+
+# 2.2.2. Fit the model with the appropriate lambda using cross-validation
+
+lasso.data <- up.preferences_and_performance
+lasso.data$fb_type <- relevel(lasso.data$fb_type, ref = "No WCF")
+
+lasso.data$outcome_binary <- ifelse(lasso.data$outcome == "Fixed", 1, 0)
+
+X <- model.matrix(~ error_type * fb_type, data = lasso.data)
+
+CV.model.RQ2.outcome <- cv.glmnet(X,
+                                  lasso.data$outcome_binary,
+                                  family = "binomial",
+                                  alpha = 1)
+par(mfrow = c(1, 2))
+plot(CV.model.RQ2.outcome)
+plot(CV.model.RQ2.outcome$glmnet.fit)
+par(mfrow = c(1, 1))
+lambda.1se <- CV.model.RQ2.outcome$lambda.1se
+
+model.RQ2.outcome <- glmnet(X,
+                            lasso.data$outcome_binary,
+                            alpha = 1,
+                            lambda = lambda.1se)
+
+lasso_coeffs <- coef(model.RQ2.outcome, s = "lambda.1se")
+plot(lasso_coeffs)
+
+model.RQ2.outcome
+lasso_coeffs
+
+new_X <- expand.grid(
+  error_type = levels(lasso.data$error_type),
+  fb_type = levels(lasso.data$fb_type)
+)
+
+# Number of parameters (non-zero coefficients in the model)
+num_parameters <- sum(coef(model.RQ2.outcome) != 0)
+
+# Deviance of the model
+deviance <- deviance(model.RQ2.outcome)
+
+# Number of observations
+n_obs <- nobs(model.RQ2.outcome)
+
+# Calculate AIC and BIC
+AIC_value <- deviance + 2 * num_parameters
+BIC_value <- deviance + log(n_obs) * num_parameters
+
+# Likelihood ratio test for R^2
+null_model <- glm(lasso.data$outcome_binary ~ 1, family = "binomial")
+null_deviance <- deviance(null_model)
+
+# Calculate R^2
+R2 <- 1 - (deviance / null_deviance)
+
+# Print the results
+cat("AIC:", AIC_value, "\n")
+cat("BIC:", BIC_value, "\n")
+cat("R^2:", R2, "\n")
+
+new_X_matrix <- model.matrix(~ error_type * fb_type, data = new_X)
+new_X_matrix <- new_X_matrix[, colnames(X)]
+
+new_X$predicted_prob <- predict(model.RQ2.outcome,
+                                newx = new_X_matrix,
+                                s = "lambda.1se", type = "response")
+
+new_X$predicted_prob <- plogis(new_X$predicted_prob)
+
+m <- ggplot(new_X, aes(x = error_type,
+                       y = predicted_prob,
+                       color = fb_type,
+                       group = fb_type)) +
+  geom_line(alpha = 0.8) +
+  geom_point() +
+  labs(title = "Effect of error and WCF type on the predicted probability of error fixing",
+       x = "\nError type",
+       y = "Predicted probability\n(0 = Repeated error; 1 = Fixed error)\n") +
+  theme_classic() +
+  scale_color_brewer(palette = "Set2") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  guides(color = guide_legend(title = "WCF type"))
+
+m
+
+
+predicted_probs <- predict(model.RQ2.outcome, newx = model.matrix(~ error_type * fb_type, data = lasso.data), s = "lambda.1se", type = "response")
+
+predicted_probs <- plogis(predicted_probs)
+
+predicted_labels <- predict(model.RQ2.outcome, newx = model.matrix(~ error_type * fb_type, data = lasso.data), s = "lambda.1se", type = "response")
+
+predicted_labels <- as.numeric(predicted_probs > 0.6097) # Median
+
+conf_matrix <- table(Actual = lasso.data$outcome_binary, Predicted = predicted_labels)
+conf_matrix
+
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+accuracy
+recall <- conf_matrix[2, 2] / sum(conf_matrix[2, ])
+recall
+precision <- conf_matrix[2, 2] / sum(conf_matrix[, 2])
+precision
+f1_score <- 2 * (precision * recall) / (precision + recall)
+f1_score
+
+prediction_obj <- prediction(predicted_labels, lasso.data$outcome_binary)
+perf <- performance(prediction_obj, "tpr", "fpr")
+plot(perf, main = "ROC Curve", col = "blue", lwd = 2)
+
+auc <- performance(prediction_obj, "auc")
+auc_value <- unlist(slot(auc, "y.values"))
+auc_value
+
+residuals_lasso <- lasso.data$outcome_binary - predicted_probs
+
+residual_data <- data.frame(predicted_probs = predicted_probs,
+                            fb_type = lasso.data$fb_type,
+                            residuals = residuals_lasso)
+
+r <- ggplot(residual_data, aes(x = predicted_probs,
+                               y = residuals_lasso,
+                               color = fb_type)) +
+  geom_point() +
+  labs(title = "Residuals vs Predicted Probabilities",
+       x = "Predicted Probabilities",
+       y = "Residuals")
+
+r
+```
+
+<br>
+<br>
+<br>
+**RQ3: IS THERE A RELATIONSHIP BETWEEN LEARNER HABITS, BELIEFS, AND PREFERENCES REGARDING SPECIFIC TYPES OF WCF AND THEIR SUCCESSFUL APPROPRIATION? IF SO, WHICH ONE AND WHY?**
+
+```{r rq3, message=FALSE, fig.width=9, fig.height=9}
+
+# === 3.1. DATA PREPARATION ===
+
+# 3.1.1. Create clarity, usefulness, and liking columns
+
+errors_and_preferences <- full_join(student_preferences, full_error_measures, by = "participant_ID")
+
+rename_map <- c("D.N.M" = "Direct non-metalinguistic WCF",
+                "D.M." = "Direct metalinguistic WCF",
+                "I.L." = "Located indirect WCF",
+                "I.M." = "Located indirect WCF",
+                "R" = "Reformulation",
+                "None" = "No WCF")
+
+errors_and_preferences$fb_type <- rename_map[errors_and_preferences$fb_type]
+
+errors_and_preferences <- errors_and_preferences %>%
+  rowwise() %>%
+  mutate(clarity = case_when(
+    fb_type == "Direct non-metalinguistic WCF" ~ fb_1_clarity,
+    fb_type == "Direct metalinguistic WCF" ~ fb_2_clarity,
+    fb_type == "Located indirect WCF" ~ fb_4_clarity,
+    fb_type == "Indirect metalinguistic WCF" ~ fb_6_clarity,
+    fb_type == "Reformulation" ~ fb_7_clarity,
+    fb_type == "No WCF" ~ 0,
+    TRUE ~ NA_real_
+  ))
+
+errors_and_preferences <- errors_and_preferences %>%
+  rowwise() %>%
+  mutate(usefulness = case_when(
+    fb_type == "Direct non-metalinguistic WCF" ~ fb_1_usefulness,
+    fb_type == "Direct metalinguistic WCF" ~ fb_2_usefulness,
+    fb_type == "Located indirect WCF" ~ fb_4_usefulness,
+    fb_type == "Indirect metalinguistic WCF" ~ fb_6_usefulness,
+    fb_type == "Reformulation" ~ fb_7_usefulness,
+    fb_type == "No WCF" ~ 0,
+    TRUE ~ NA_real_
+  ))
+
+errors_and_preferences <- errors_and_preferences %>%
+  rowwise() %>%
+  mutate(liking = case_when(
+    fb_type == "Direct non-metalinguistic WCF" ~ likes_fb_1,
+    fb_type == "Direct metalinguistic WCF" ~ likes_fb_2,
+    fb_type == "Located indirect WCF" ~ likes_fb_4,
+    fb_type == "Indirect metalinguistic WCF" ~ likes_fb_6,
+    fb_type == "Reformulation" ~ likes_fb_7,
+    fb_type == "No WCF" ~ 0,
+    TRUE ~ NA_real_
+  ))
+
+
+# 3.1.2. Combine with participant random effects
+
+habits_beliefs_data <- errors_and_preferences %>%
+  dplyr::select(participant_ID,
+                fb_type,
+                `Importance given to feedback` = fb_importance,
+                `Seeking additional information on errors` = freq_seek_additional_info,
+                `Perceived WCF format clarity` = clarity,
+                `Perceived WCF format usefulness` = usefulness,
+                `WCF format liking` = liking)
+
+`Participant random effects` <- ranef(model.RQ1.errorRate)$cond$participant_ID
+
+participant_random_effects_df <- as.data.frame(`Participant random effects`)
+participant_random_effects_df$participant_ID <- rownames(participant_random_effects_df)
+participant_random_effects_df <- participant_random_effects_df %>%
+  rename(`Participant random effects (overall error rate)` = `(Intercept)`)
+
+habits_beliefs_data <- merge(habits_beliefs_data, participant_random_effects_df, by = "participant_ID")
+
+# 3.1.3. Combine with participant success rate
+success_rate <- preferences_and_performance %>%
+  group_by(participant_ID) %>%
+  summarize(
+    fixed_count = sum(outcome == "Fixed"),
+    repeated_count = sum(outcome == "Repeated"),
+    `Correction success rate (tracked errors)` = fixed_count / (fixed_count + repeated_count)
+  )
+
+success_rate <- success_rate %>%
+  dplyr::select(-fixed_count, -repeated_count)
+
+habits_beliefs_data <- left_join(habits_beliefs_data, success_rate, by = "participant_ID")
+
+habits_beliefs_data <- distinct(habits_beliefs_data)
+
+
+# --- 3.2. CORRELATIONS ---
+
+cols.correlation <- habits_beliefs_data[, c(3:ncol(habits_beliefs_data))]
+
+cols.correlation <- cols.correlation %>%
+  select_if(is.numeric) %>%
+  ungroup()
+
+p_values <- matrix(NA, nrow = ncol(cols.correlation), ncol = ncol(cols.correlation))
+
+for (i in 1:(ncol(cols.correlation) - 1)) {
+  for (j in (i + 1):ncol(cols.correlation)) {
+    # Extract columns for the correlation test
+    x <- cols.correlation[[i]]
+    y <- cols.correlation[[j]]
+
+    # Perform the correlation test
+    cor_test_result <- cor.test(x, y, method = "spearman", exact = FALSE)
+
+    # Store the p-value in the matrix
+    p_values[i, j] <- cor_test_result$p.value
+    p_values[j, i] <- cor_test_result$p.value
+  }
+}
+
+p_values
+
+corr.matrix <- cor(cols.correlation, use = "complete.obs", method = "spearman")
+par(mfrow = c(1, 1))
+
+# Create significance matrix with BH correction
+p_values_adjusted <- p.adjust(p_values, method = "BH")
+p_values_matrix <- matrix(p_values_adjusted, nrow = nrow(p_values), ncol = ncol(p_values))
+
+p_values_matrix <- round(p_values_matrix, 3)
+
+rownames(p_values_matrix) <- rownames(corr.matrix)
+colnames(p_values_matrix) <- colnames(corr.matrix)
+
+corrplot(corr.matrix, method = "ellipse", type = "lower", order = "original", diag = FALSE,
+         mar=c(0,0,1,0), tl.cex = 0.75, tl.col = "black", tl.srt = 45, addCoef.col = "black",
+         p.mat = p_values_matrix, sig.level = 0.05, insig = "pch", pch.col = "grey40")
+par(mfrow = c(1, 1))
+```
+
