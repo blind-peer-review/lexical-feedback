@@ -2,11 +2,36 @@
 title: "Statistical analyses"
 author: "Author 1"
 date: "2023-10-24"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+Sys.setenv(
+  CC    = "clang",
+  CXX   = "clang++",
+  CXX11 = "clang++",
+  CXX14 = "clang++",
+  CXX17 = "clang++"
+)
+Sys.setenv(SDKROOT = system("/usr/bin/xcrun --show-sdk-path", intern = TRUE))
+
+# cmdstanr/rstan/brms preferences
+options(brms.backend = "cmdstanr")
+
+options(mc.cores = parallel::detectCores())
+rstan::rstan_options(auto_write = TRUE)
+
+options(max.print=1e6)                  # Print up to a million entries!
+options(knitr.kable.NA = '')            # For better table handling (optional)
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = TRUE,
+  message = TRUE,
+  max.lines = 1e6                       # Ensures chunk output isn't truncated
+)
 ```
 
 <br>
@@ -43,6 +68,17 @@ library(ROCR)
 library(broom.mixed)
 library(boot)
 library(parameters)
+library(sandwich)
+library(clubSandwich)
+library(multiwayvcov)
+library(pscl)
+library(ResourceSelection)
+library(pROC)
+library(cmdstanr)
+library(brms)
+library(patchwork)
+library(bayesplot)
+library(future)
 ```
 <br>
 <br>
@@ -64,14 +100,14 @@ tracked_text_analysis <- read_csv('Data/tracked_error_measures.csv')
 
 <br>
 <br>
-**RQ1: WHAT TYPES OF WCF, IF ANY, MOST EFFECTIVELY ENHANCE THE LEXICAL ACCURACY OF ADVANCED SFL LEARNERS? DO THEY ACHIEVE THIS IMPROVEMENT AT THE COST OF LEXICAL COMPLEXITY?**
+**RQ1: IN WHAT WAYS DO DIFFERENT TYPES OF WCF INFLUENCE THE LEXICAL ACCURACY OF ADVANCED L2 SPANISH LEARNERS? HOW, IF AT ALL, DOES THIS AFFECT LEXICAL COMPLEXITY?**
 <br>
 
 ```{r rq1 analyses, message=FALSE, fig.width=12, fig.height=6}
 
 # 1.1. === DATA PREPARATION ===
 
-full_text_analysis <- full_join(full_text_analysis, full_error_measures, by = "error")
+full_text_analysis <- full_join(full_text_analysis, full_error_measures, by = "error", relationship = "many-to-many")
 rows_to_remove <- c(65, 67, 187, 195)
 full_text_analysis <- full_text_analysis[-rows_to_remove,]
 
@@ -81,7 +117,7 @@ lmm.df <- full_text_analysis %>% dplyr::select(participant_ID = participant_ID.x
                                                fb_type = fb_type.x,
                                                word_count = Total,
                                                lexical_density = `Lexical density`,
-                                               FreqC1, FreqC2, rttr, mtld, error_rate)
+                                               FreqC1, FreqC2, rttr, mtld, error_rate, error_count)
 
 lmm.df.wide <- lmm.df %>%
   group_by(text_ID, fb_type) %>%
@@ -110,7 +146,7 @@ lmm.df <- lmm.df %>%
   mutate(across(starts_with("fb_count_"), ~ . / word_count, .names = "rate_{.col}"))
 
 lmm.df <- lmm.df %>%
-  dplyr::select(-word_count, -c("fb_count_D.M.":"fb_count_R"))
+  dplyr::select(-c("fb_count_D.M.":"fb_count_R"))
 
 lmm.df$participant_ID <- as.factor(lmm.df$participant_ID)
 lmm.df$TextNum <- as.factor(lmm.df$TextNum)
@@ -128,8 +164,7 @@ lmm.df$rate_fb_count_R <- scale(lmm.df$rate_fb_count_R)
 # 1.2.1. Fitting and interpreting the model
 
 model.RQ1.errorRate <- glmmTMB(
-  error_rate ~ rate_fb_count_D.M. + rate_fb_count_D.N.M + rate_fb_count_I.L. +
-    rate_fb_count_I.M. + rate_fb_count_None + rate_fb_count_R + (1|participant_ID) + (1|TextNum),
+  error_rate ~ rate_fb_count_D.M. + rate_fb_count_D.N.M + rate_fb_count_I.L. + rate_fb_count_I.M. + rate_fb_count_R + rate_fb_count_None + TextNum + (1|participant_ID),
   data = lmm.df, family = beta_family())
 
 summary(model.RQ1.errorRate)
@@ -143,7 +178,7 @@ overdisp <- residuals(model.RQ1.errorRate, type = "pearson")^2
 overdisp_ratio <- sum(overdisp) / df.residual(model.RQ1.errorRate)
 overdisp_ratio
 
-car::vif(lm(error_rate ~ rate_fb_count_D.M. + rate_fb_count_D.N.M + rate_fb_count_I.L. + rate_fb_count_I.M. + rate_fb_count_None + rate_fb_count_R, data = lmm.df))
+car::vif(lm(error_rate ~ rate_fb_count_D.M. + rate_fb_count_D.N.M + rate_fb_count_I.L. + rate_fb_count_I.M. + rate_fb_count_None + rate_fb_count_R + TextNum, data = lmm.df))
 
 
 # 1.2.3 Visualizing fitted values vs. observed values
@@ -245,7 +280,7 @@ p_values_density_corrected
 <br>
 <br>
 <br>
-**RQ2: HOW DO THE DIFFERENT WCF FORMATS THE TEACHER PROVIDES RELATE TO THE VARIOUS TYPES OF LEXICAL ERRORS COMMITTED BY THE LEARNERS AND THEIR SUBSEQUENT MENDING OR REPETITION?**
+**RQ2: HOW DO DIFFERENT WCF FORMATS INTERACT WITH VARIOUS TYPES OF LEXICAL ERRORS, AND WHAT PATTERNS EMERGE IN LEARNERS' RESPONSES, INCLUDING ERROR CORRECTION OR REPETITION?**
 
 ```{r rq2, message=FALSE, fig.width=12, fig.height=6}
 
@@ -442,24 +477,46 @@ r
 <br>
 <br>
 <br>
-**RQ3: IS THERE A RELATIONSHIP BETWEEN LEARNER HABITS, BELIEFS, AND PREFERENCES REGARDING SPECIFIC TYPES OF WCF AND THEIR SUCCESSFUL APPROPRIATION? IF SO, WHICH ONE AND WHY?**
+**RQ3: HOW DO LEARNER HABITS, BELIEFS, AND PREFERENCES SHAPE THEIR ENGAGEMENT WITH DIFFERENT TYPES OF WCF, AND WHAT FACTORS CONTRIBUTE TO THEIR SUCCESSFUL APPROPRIATION?**
 
-```{r rq3, message=FALSE, fig.width=9, fig.height=9}
+```{r rq3a, fig.height=6, fig.width=12, message=FALSE, results="verbatim", max.lines=1e6}
+Sys.setenv(
+  SDKROOT = system("xcrun --show-sdk-path", intern = TRUE),
+  CC    = "clang",
+  CXX   = "clang++",
+  CXX11 = "clang++",
+  CXX14 = "clang++",
+  CXX17 = "clang++"
+)
 
 # === 3.1. DATA PREPARATION ===
 
 # 3.1.1. Create clarity, usefulness, and liking columns
 
-errors_and_preferences <- full_join(student_preferences, full_error_measures, by = "participant_ID")
-
-rename_map <- c("D.N.M" = "Direct non-metalinguistic WCF",
-                "D.M." = "Direct metalinguistic WCF",
-                "I.L." = "Located indirect WCF",
-                "I.M." = "Located indirect WCF",
-                "R" = "Reformulation",
-                "None" = "No WCF")
-
-errors_and_preferences$fb_type <- rename_map[errors_and_preferences$fb_type]
+errors_and_preferences <- preferences_and_performance %>%
+  dplyr::select(participant_ID,
+                fb_importance,
+                freq_seek_additional_info,
+                how_much_fb_helps_learn,
+                fb_1_clarity,
+                fb_1_usefulness,
+                likes_fb_1,
+                fb_2_clarity,
+                fb_2_usefulness,
+                likes_fb_2,
+                fb_4_clarity,
+                fb_4_usefulness,
+                likes_fb_4,
+                fb_6_clarity,
+                fb_6_usefulness,
+                likes_fb_6,
+                fb_7_clarity,
+                fb_7_usefulness,
+                likes_fb_7,
+                error_type,
+                fb_type,
+                outcome,
+                TextNum)
 
 errors_and_preferences <- errors_and_preferences %>%
   rowwise() %>%
@@ -497,86 +554,248 @@ errors_and_preferences <- errors_and_preferences %>%
     TRUE ~ NA_real_
   ))
 
+errors_and_preferences$outcome_binary <- ifelse(errors_and_preferences$outcome == "Fixed", 1, 0)
 
-# 3.1.2. Combine with participant random effects
 
-habits_beliefs_data <- errors_and_preferences %>%
-  dplyr::select(participant_ID,
-                fb_type,
-                `Importance given to feedback` = fb_importance,
-                `Seeking additional information on errors` = freq_seek_additional_info,
-                `Perceived WCF format clarity` = clarity,
-                `Perceived WCF format usefulness` = usefulness,
-                `WCF format liking` = liking)
+# 3.1.2. Calculate composite beliefs and preference scores
 
-`Participant random effects` <- ranef(model.RQ1.errorRate)$cond$participant_ID
+# Check Cronbach's α for each group of items
 
-participant_random_effects_df <- as.data.frame(`Participant random effects`)
-participant_random_effects_df$participant_ID <- rownames(participant_random_effects_df)
-participant_random_effects_df <- participant_random_effects_df %>%
-  rename(`Participant random effects (overall error rate)` = `(Intercept)`)
+alpha_pref <- psych::alpha(errors_and_preferences[c("clarity",
+                      "usefulness",
+                      "liking")])
 
-habits_beliefs_data <- merge(habits_beliefs_data, participant_random_effects_df, by = "participant_ID")
+alpha_belief <- psych::alpha(errors_and_preferences[c("fb_importance", "how_much_fb_helps_learn")])
 
-# 3.1.3. Combine with participant success rate
-success_rate <- preferences_and_performance %>%
-  group_by(participant_ID) %>%
-  summarize(
-    fixed_count = sum(outcome == "Fixed"),
-    repeated_count = sum(outcome == "Repeated"),
-    `Correction success rate (tracked errors)` = fixed_count / (fixed_count + repeated_count)
+# Compute the composite scores
+
+errors_and_preferences <- errors_and_preferences %>%
+  ungroup() %>% # step 1: drop the rowwise grouping
+  mutate(
+    # Habits: there's only one indicator
+    habit_score = freq_seek_additional_info,
+
+    # Beliefs: two items
+    belief_score = (fb_importance + how_much_fb_helps_learn) / 2,
+
+    # Preferences: three items, matching this row's fb_type
+    preference_score = (clarity + usefulness + liking) / 3
   )
 
-success_rate <- success_rate %>%
-  dplyr::select(-fixed_count, -repeated_count)
+errors_and_preferences <- errors_and_preferences %>%
+  dplyr::select(participant_ID,
+                belief_score,
+                habit_score,
+                preference_score,
+                error_type,
+                fb_type,
+                outcome_binary,
+                TextNum)
 
-habits_beliefs_data <- left_join(habits_beliefs_data, success_rate, by = "participant_ID")
 
-habits_beliefs_data <- distinct(habits_beliefs_data)
+# 3.1.3. Scale habit, belief, and preference scores
 
+scaled_learner_differences <- errors_and_preferences %>%
+  mutate(across(
+    .cols = c(habit_score, belief_score, preference_score),
+    .fns = ~ as.numeric(scale(.)),
+    .names = "{.col}_z"
+  ))
 
-# --- 3.2. CORRELATIONS ---
+# 3.1.4. Prepare data sets
 
-cols.correlation <- habits_beliefs_data[, c(3:ncol(habits_beliefs_data))]
+# Pivot lmm.df long on the rate_fb_count_* columns
+fb_cols <- grep("^rate_fb_count_", names(lmm.df), value = TRUE)
 
-cols.correlation <- cols.correlation %>%
-  select_if(is.numeric) %>%
-  ungroup()
+lmm_long <- lmm.df %>%
+  pivot_longer(
+    cols = all_of(fb_cols),
+    names_to = "fb_type",
+    values_to = "rate_scaled"
+  ) %>%
+  mutate(
+    fb_type = case_when(
+      fb_type == "rate_fb_count_D.M."  ~ "Direct non-metalinguistic WCF",
+      fb_type == "rate_fb_count_D.N.M" ~ "Direct metalinguistic WCF",
+      fb_type == "rate_fb_count_I.L."  ~ "Located indirect WCF",
+      fb_type == "rate_fb_count_I.M."  ~ "Indirect metalinguistic WCF",
+      fb_type == "rate_fb_count_R"     ~ "Reformulation",
+      fb_type == "rate_fb_count_None"  ~ "No WCF",
+      TRUE                             ~ fb_type
+    ),
+    errors_made = error_count,
+    tokens_total = word_count
+  ) %>%
+  dplyr::select(participant_ID, TextNum, fb_type, errors_made, tokens_total)
 
-p_values <- matrix(NA, nrow = ncol(cols.correlation), ncol = ncol(cols.correlation))
+# Join
+scaled_learner_differences <- scaled_learner_differences %>% mutate(TextNum = as.character(TextNum))
 
-for (i in 1:(ncol(cols.correlation) - 1)) {
-  for (j in (i + 1):ncol(cols.correlation)) {
-    # Extract columns for the correlation test
-    x <- cols.correlation[[i]]
-    y <- cols.correlation[[j]]
+df_mv <- scaled_learner_differences %>%
+  left_join(lmm_long,
+            by = c("participant_ID", "TextNum", "fb_type")
+            )
 
-    # Perform the correlation test
-    cor_test_result <- cor.test(x, y, method = "spearman", exact = FALSE)
+df_mv$fb_type <- relevel(factor(df_mv$fb_type), ref = "No WCF")
+df_mv$error_type <- factor(df_mv$error_type)
 
-    # Store the p-value in the matrix
-    p_values[i, j] <- cor_test_result$p.value
-    p_values[j, i] <- cor_test_result$p.value
-  }
-}
+# 3.1.5. Fit the joint model in brms
 
-p_values
+priors.RQ3 <- c(
+  # 1) Intercept on error-rate
+  prior(normal(-3.22, 1), class = "Intercept", resp = "errorsmade"),
+  # 2) WCF effects on errors_made (centered on RQ1 ORs)
+  prior(normal(-0.04, 0.3), class = "b", coef = "fb_typeDirectmetalinguisticWCF", resp = "errorsmade"),
+  prior(normal(0.03, 0.3), class = "b", coef = "fb_typeDirectnonMmetalinguisticWCF", resp = "errorsmade"),
+  prior(normal(-0.13, 0.2), class = "b", coef = "fb_typeIndirectmetalinguisticWCF", resp = "errorsmade"),
+  prior(normal(-0.03, 0.3), class = "b", coef = "fb_typeLocatedindirectWCF", resp = "errorsmade"),
+  prior(normal(0.10, 0.3), class = "b", coef = "fb_typeReformulation", resp = "errorsmade"),
+  # 3) All other slopes (e.g., habit_score_z, belief_score_z, ...) on each submodel
+  prior(normal(0, 1), class = "b", resp = "errorsmade"),
+  prior(normal(0, 1), class = "b", resp = "outcomebinary"),
+  # 4) Random-effects scales informed by RQ1
+  prior(student_t(3, 0, 0.27), class = "sd", group = "participant_ID", resp = "errorsmade"),
+  prior(student_t(3, 0, 0.27), class = "sd", group = "participant_ID", resp = "outcomebinary"),
+  # From:
+  # df_mv %>%
+  #  group_by(error_type) %>%
+  #  summarize(
+  #    prop = mean(errors_made / tokens_total),
+  #    logit_prop = boot::logit(prop)
+  #    ) %>%
+  #  summarize(sd = sd(logit_prop))
+  prior(student_t(3, 0, 0.25), class = "sd", group = "error_type", resp = "errorsmade"),
+  # From:
+  # df_mv %>%
+  # group_by(error_type) %>%
+  # summarize(
+    # total trials and total successes per error type
+    # n_trials    = sum(tokens_total),
+    # n_successes = sum(outcome_binary)
+  # ) %>%
+  # mutate(
+    # empirical logit with +0.5 / +1 smoothing
+    # logit_success = log((n_successes + 0.5) / (n_trials - n_successes + 0.5))
+  # ) %>%
+  # summarize(
+    # sd_logit = sd(logit_success)
+  # )
+  prior(student_t(3, 0, 0.57), class = "sd", group = "error_type", resp = "outcomebinary"),
+  prior(student_t(3, 0, 0.15), class = "sd", group = "row_id", resp = "errorsmade"),
+  prior(student_t(3, 0, 0.15), class = "sd", group = "row_id", resp = "outcomebinary"),
+  # 5) Random-effects correlation
+  prior(lkj(2), class = "cor")
+)
 
-corr.matrix <- cor(cols.correlation, use = "complete.obs", method = "spearman")
-par(mfrow = c(1, 1))
+# Add observation-level random intercept (OLRE) because beta-binomial cannot converge at a reasonable speed
 
-# Create significance matrix with BH correction
-p_values_adjusted <- p.adjust(p_values, method = "BH")
-p_values_matrix <- matrix(p_values_adjusted, nrow = nrow(p_values), ncol = ncol(p_values))
+df_mv$row_id <- 1:nrow(df_mv)
 
-p_values_matrix <- round(p_values_matrix, 3)
+system.time({
+  model.RQ3.appropriation <- brm(
+  bf(errors_made | trials(tokens_total) ~ fb_type + habit_score_z + belief_score_z + preference_score_z + (1 | p | participant_ID) + (1 | e | error_type) + (1 | row_id)) +
+    bf(outcome_binary ~ fb_type + habit_score_z + belief_score_z + preference_score_z + (1 | p | participant_ID) + (1 | e | error_type) + (1 | row_id)) + set_rescor(FALSE),
+  data = df_mv,
+  family = list(binomial(), bernoulli()),
+  prior = priors.RQ3,
+  cores = 4,
+  chains = 4,
+  refresh = 100,
+  iter = 4000,
+  warmup = 2000,
+  seed = 123,
+  save_pars  = save_pars(all = TRUE),
+  control = list(
+    adapt_delta = 0.995,
+    max_treedepth = 20
+  ))
+})
 
-rownames(p_values_matrix) <- rownames(corr.matrix)
-colnames(p_values_matrix) <- colnames(corr.matrix)
+summary(model.RQ3.appropriation)
+```
 
-corrplot(corr.matrix, method = "ellipse", type = "lower", order = "original", diag = FALSE,
-         mar=c(0,0,1,0), tl.cex = 0.75, tl.col = "black", tl.srt = 45, addCoef.col = "black",
-         p.mat = p_values_matrix, sig.level = 0.05, insig = "pch", pch.col = "grey40")
-par(mfrow = c(1, 1))
+```{r rq3b, results='asis', fig.height=6, fig.width=12}
+#summary_lines <- capture.output(summary(model.RQ3.appropriation))
+#cat('<div style="max-height:500px;overflow:auto;background:#f8f8f8;"><pre>',
+#    paste(summary_lines, collapse="\n"),
+#    '</pre></div>')
+
+# out <- capture.output(summary(model.RQ3.appropriation))
+# cat(out, sep = "\n")
+# summary_out <- capture.output(summary(model.RQ3.appropriation))
+# cat(head(summary_out, 200), sep = "\n")   # First 200 lines
+# cat(tail(summary_out, 50), sep = "\n")    # Last 50 lines
+
+```
+
+```{r rq3c, fig.height=6, fig.width=12}
+
+pp_check(model.RQ3.appropriation, resp = "errorsmade", type = "intervals_grouped", group = "participant_ID")
+pp_check(model.RQ3.appropriation, resp = "errorsmade", type = "intervals_grouped", group = "error_type")
+
+pp_check(model.RQ3.appropriation, resp = "errorsmade", type = "stat_2d", stat = c("mean", "var"))
+
+bayes_R2(model.RQ3.appropriation, resp = "errorsmade")
+bayes_R2(model.RQ3.appropriation, resp = "outcomebinary")
+
+# Perform 10-fold cross-validation to get a robust estimate of out-of-sample predictive performance to avoid Pareto k issues altogether, since PSIS flagged 133 complicated observations when introducing overdispersion through OLRE
+
+# Allow up to 1 GiB of globals
+
+options(future.globals.maxSize = 1024^3)
+#loo_mm <- loo(model.RQ3.appropriation)
+#loo_mm # yields Warning: Found 133 observations with a pareto_k > 0.7 in model 'model.RQ3.appropriation'. With this many problematic observations, it may be more appropriate to use 'kfold' with argument 'K = 10' to perform 10-fold cross-validation rather than LOO.
+
+kf10 <- kfold(model.RQ3.appropriation, K = 10)
+kf10$estimates
+
+kfoldic <- -2 * kf10$estimates["elpd_kfold", "Estimate"]
+se_kfoldic <- 2 * kf10$estimates["elpd_kfold", "SE"]
+
+kfoldic
+se_kfoldic
+
+```
+
+```{r rq3d, fig.height=9, fig.width=6}
+
+# Print most relevant PPC
+
+mod <- model.RQ3.appropriation
+
+# make each PPC
+p_density <- pp_check(mod,
+                      resp = "errorsmade",
+                      type = "dens_overlay",
+                      ndraws = 1000) +
+  ggtitle("A: Error rate density") +
+  theme_minimal()
+
+p_rootogram <- pp_check(mod,
+                        resp = "errorsmade",
+                        type = "rootogram") +
+  ggtitle("B: Error rate rootogram") +
+  theme_minimal()
+
+p_bars <- pp_check(mod,
+                   resp = "outcomebinary",
+                   type = "bars",
+                   ndraws = 1000) +
+  ggtitle("C: Fixed/repeated error counts") +
+  theme_minimal()
+
+# combine with patchwork
+figure_ppc <- (p_density / p_rootogram / p_bars) +
+  plot_annotation(
+    title = "Posterior Predictive Checks for RQ3 model",
+    theme = theme(plot.title = element_text(size = 14, face = "bold"))
+  ) +
+    plot_layout(
+    ncol    = 1,
+    heights = c(2, 2, 2.5)   # make the bottom plot a bit taller
+  )
+
+figure_ppc
+
 ```
 
